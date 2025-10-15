@@ -8,6 +8,102 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 import pandas as pd
 from dateutil.relativedelta import relativedelta
+from selenium.common.exceptions import (
+    TimeoutException,
+    StaleElementReferenceException,
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+)
+import re
+from typing import Dict, Set, Optional
+
+TEMP_SUFFIXES = (".crdownload", ".part", ".download", ".tmp")
+
+def _listar_arquivos_validos(pasta: str) -> Dict[str, float]:
+    """
+    Retorna dict {nome_arquivo: mtime} ignorando arquivos temporários.
+    """
+    itens = {}
+    for nome in os.listdir(pasta):
+        # ignora temp de navegadores
+        if nome.lower().endswith(TEMP_SUFFIXES):
+            continue
+        caminho = os.path.join(pasta, nome)
+        if os.path.isfile(caminho):
+            itens[nome] = os.path.getmtime(caminho)
+    return itens
+
+def snapshot_downloads(pasta_download: str) -> Set[str]:
+    """Tira um snapshot (conjunto) dos nomes existentes e válidos na pasta."""
+    return set(_listar_arquivos_validos(pasta_download).keys())
+
+def _match_por_regex_ou_substring(nome: str, regex: Optional[str], substring: Optional[str]) -> bool:
+    if regex:
+        return re.search(regex, nome) is not None
+    if substring:
+        return substring.lower() in nome.lower()
+    return False  # se nada foi fornecido, não casa
+
+def _arquivo_estavel(caminho: str, espera_estabilidade: float = 2.0) -> bool:
+    """
+    Considera 'estável' se o tamanho não mudar dentro da janela espera_estabilidade.
+    """
+    try:
+        tamanho1 = os.path.getsize(caminho)
+        time.sleep(espera_estabilidade)
+        tamanho2 = os.path.getsize(caminho)
+        return tamanho1 == tamanho2
+    except FileNotFoundError:
+        return False
+
+def aguardar_novo_download(
+    pasta_download: str,
+    snapshot_anterior: Set[str],
+    nome_substring: Optional[str] = None,
+    regex_nome: Optional[str] = None,
+    timeout: int = 180,
+    intervalo_polls: float = 1.5,
+    espera_estabilidade: float = 2.0,
+) -> str:
+    """
+    Aguarda até surgir UM NOVO arquivo (não-temp) na pasta, que case com
+    regex_nome OU nome_substring, e esteja estável.
+    Retorna o CAMINHO COMPLETO do arquivo encontrado.
+
+    Estratégia:
+    1) Compara o diretório com snapshot_anterior e pega apenas os 'novos'.
+    2) Dentro dos novos, filtra por padrão (regex ou substring).
+    3) Garante estabilidade (tamanho não cresce).
+    4) Se múltiplos novos casarem, pega o mais recente por mtime.
+    """
+    print(f"[INFO] Aguardando novo download na pasta: {pasta_download}")
+    inicio = time.time()
+
+    while time.time() - inicio <= timeout:
+        atuais = _listar_arquivos_validos(pasta_download)
+        novos = [n for n in atuais.keys() if n not in snapshot_anterior]
+
+        # filtra por padrão
+        candidatos = [n for n in novos if _match_por_regex_ou_substring(n, regex_nome, nome_substring)]
+
+        if candidatos:
+            # escolhe o mais recente pelo mtime
+            candidatos.sort(key=lambda n: atuais[n], reverse=True)
+            escolhido = candidatos[0]
+            caminho_escolhido = os.path.join(pasta_download, escolhido)
+
+            # confirma estabilidade
+            if _arquivo_estavel(caminho_escolhido, espera_estabilidade=espera_estabilidade):
+                print(f"[OK] Novo arquivo detectado e estável: {escolhido}")
+                return caminho_escolhido
+            # se não estável ainda, continua polling
+        time.sleep(intervalo_polls)
+
+    raise TimeoutError(
+        "[ERRO] Tempo limite esperando novo download compatível com o padrão. "
+        "Verifique se o navegador realmente iniciou o download e o nome esperado."
+    )
+
 
 def gerar_periodos(data_inicial: str, data_final: str, meses_por_bloco: int = 6):
     """
@@ -60,15 +156,20 @@ def gerar_periodos(data_inicial: str, data_final: str, meses_por_bloco: int = 6)
     return periodos
 
 
-
-def iniciar_chrome(url_inicial: str = None, modo_headless: bool = False, zoom: float = 1.0):
+def iniciar_chrome(
+    url_inicial: str = None,
+    modo_headless: bool = False,
+    zoom: float = 1.0,
+    pasta_download: str = None
+):
     """
-    Inicia o navegador Chrome silenciosamente, acessa a URL inicial e define o zoom.
+    Inicia o navegador Chrome com download controlado e configurações seguras.
 
     Parâmetros:
         url_inicial (str): URL opcional para abrir.
         modo_headless (bool): Define se o navegador será iniciado sem interface.
         zoom (float): Define o nível de zoom da página (1.0 = 100%, 0.8 = 80%, etc.)
+        pasta_download (str): Caminho da pasta onde os downloads serão salvos.
     """
     print("[INFO] Iniciando navegador Chrome...")
 
@@ -86,6 +187,20 @@ def iniciar_chrome(url_inicial: str = None, modo_headless: bool = False, zoom: f
     if modo_headless:
         chrome_options.add_argument("--headless=new")
 
+    # ✅ Configuração de pasta de download segura
+    if pasta_download:
+        os.makedirs(pasta_download, exist_ok=True)
+        prefs = {
+            "download.default_directory": os.path.abspath(pasta_download),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True
+        }
+        chrome_options.add_experimental_option("prefs", prefs)
+        print(f"[INFO] Pasta de download configurada: {pasta_download}")
+    else:
+        print("[AVISO] Nenhuma pasta de download definida — Chrome usará a padrão do sistema.")
+
     # Redireciona logs do ChromeDriver para /dev/null (silêncio total)
     try:
         with open(os.devnull, 'w') as devnull:
@@ -97,6 +212,7 @@ def iniciar_chrome(url_inicial: str = None, modo_headless: bool = False, zoom: f
         os.dup2(old_out, 1)
         os.dup2(old_err, 2)
 
+    # Abre a URL inicial (se houver)
     if url_inicial:
         driver.get(url_inicial)
         print(f"[INFO] Acessando URL: {url_inicial}")
@@ -111,17 +227,6 @@ def iniciar_chrome(url_inicial: str = None, modo_headless: bool = False, zoom: f
         print(f"[AVISO] Não foi possível definir o zoom: {e}")
 
     return driver
-
-import time
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    TimeoutException,
-    StaleElementReferenceException,
-    ElementClickInterceptedException,
-    ElementNotInteractableException,
-)
 
 def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int = 25, delay_apos_acao: float = 0.4):
     """
@@ -170,7 +275,7 @@ def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int 
                 if acao == "clicar":
                     try:
                         elemento.click()
-                        print(f"[INFO] Ação 'clicar' executada com sucesso: {descricao}")
+                        #print(f"[→] {descricao}")
                         time.sleep(delay_apos_acao)
                         break
                     except (ElementClickInterceptedException, ElementNotInteractableException) as e:
@@ -193,7 +298,7 @@ def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int 
                     try:
                         elemento.clear()
                         elemento.send_keys(texto)
-                        print(f"[INFO] Ação 'digitar' executada com sucesso: {descricao}")
+                        #print(f"[→] digitou em {descricao}")
                         time.sleep(delay_apos_acao)
                         break
                     except Exception as e:
@@ -204,7 +309,7 @@ def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int 
                         try:
                             elemento.clear()
                             elemento.send_keys(texto)
-                            print(f"[INFO] Ação 'digitar' executada com sucesso: {descricao}")
+                            #print(f"[INFO] Ação 'digitar' executada com sucesso: {descricao}")
                             time.sleep(delay_apos_acao)
                             break
                         except Exception:
@@ -214,7 +319,7 @@ def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int 
                     raise ValueError(f"Ação inválida: {acao}")
 
             except (TimeoutException, StaleElementReferenceException) as e:
-                print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: {type(e).__name__}. Fechando avisos...")
+                #print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: {type(e).__name__}. Fechando avisos...")
                 fechar_avisos()
                 time.sleep(1.1 * tentativa)
                 if tentativa == max_retries:

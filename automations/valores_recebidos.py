@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import time
 from functions import iniciar_chrome, interagir_elementos, realizar_login_codonto
 
+
 # =========================================================
 # ========== CONFIGURAÇÕES ================================
 # =========================================================
@@ -17,21 +18,26 @@ TABELA = "Recebidos"
 DIRETORIO_DOWNLOADS = r"/home/odonto/bots/downloads"
 CREDENCIAIS_PATH = r"/home/odonto/bots/GBOQ.json"
 NOME_PADRAO_ARQUIVO = 'ControleODONTO Fluxo de Caixa'
+ETL_CONFIG = {
+    "skip_top": 0,          # pular as N primeiras linhas
+    "skip_bottom": 2,       # pular as N últimas linhas
+    "etl_especifico": "recebidos",  # nome do módulo específico
+}
 
 # =========================================================
 # ========== FUNÇÃO PRINCIPAL =============================
 # =========================================================
-def executar_recebidos(usuario: str, senha: str, inicio: str, fim: str, zoom: float = 0.8):
+def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_download=None):
+    
     """
     Executa a automação de valores recebidos até a etapa de download.
     """
     print("\n=== INICIANDO AUTOMAÇÃO: VALORES RECEBIDOS ===")
 
     # 1️⃣ Iniciar navegador
-    driver = iniciar_chrome(
-        url_inicial="https://codonto.aplicativo.net/",
-        modo_headless=False,
-        zoom=zoom
+    driver = iniciar_chrome("https://codonto.aplicativo.net/", 
+                            zoom=zoom,
+                            pasta_download=pasta_download
     )
 
     # 2️⃣ Login
@@ -52,8 +58,8 @@ def executar_recebidos(usuario: str, senha: str, inicio: str, fim: str, zoom: fl
             {"xpath": "//a[@href='#maintabRecebiveis-recebidos']", "descricao": "Aba Recebidos"},
             {"xpath": "//a[@href='#subtabRecebidos-pesquisar']", "descricao": "Subaba Pesquisar"},
             {"xpath": "//span[@title='Mostrar Período']", "n": 0, "descricao": "Mostrar Período"},
-            {"xpath": "//input[@name='RecebidoDataInicio']", "acao": "digitar", "texto": inicio, "descricao": "Data Início"},
-            {"xpath": "//input[@name='RecebidoDataTermino']", "acao": "digitar", "texto": fim, "descricao": "Data Fim"},
+            {"xpath": "//input[@name='RecebidoDataInicio']", "acao": "digitar", "texto": data_inicio, "descricao": "Data Início"},
+            {"xpath": "//input[@name='RecebidoDataTermino']", "acao": "digitar", "texto": data_fim, "descricao": "Data Fim"},
             {"xpath": "//a[@id='Filtrar']", "n": 2, "descricao": "Botão Filtrar"},
         ]
 
