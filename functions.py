@@ -6,6 +6,60 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+import pandas as pd
+from dateutil.relativedelta import relativedelta
+
+def gerar_periodos(data_inicial: str, data_final: str, meses_por_bloco: int = 6):
+    """
+    Divide o intervalo em blocos de meses (ex: 6 meses = semestre).
+    Retorna lista de tuplas (inicio, fim).
+    """
+    inicio = pd.to_datetime(data_inicial)
+    fim = pd.to_datetime(data_final)
+    periodos = []
+
+    while inicio <= fim:
+        proximo_fim = min(inicio + relativedelta(months=meses_por_bloco) - pd.Timedelta(days=1), fim)
+        periodos.append((inicio.date(), proximo_fim.date()))
+        inicio = proximo_fim + pd.Timedelta(days=1)
+
+    return periodos
+
+
+def rodar_em_blocos(data_inicial, data_final, meses_por_bloco, func_execucao):
+    """
+    Controla a execução de qualquer função em blocos de tempo.
+    Recebe:
+      - data_inicial, data_final
+      - meses_por_bloco (ex: 6)
+      - func_execucao(inicio, fim): função que roda o ETL de cada bloco
+    """
+    periodos = gerar_periodos(data_inicial, data_final, meses_por_bloco)
+    print(f"[INFO] Intervalo total {data_inicial} a {data_final}")
+    print(f"[INFO] Dividido em {len(periodos)} blocos de {meses_por_bloco} meses cada.\n")
+
+    for i, (inicio, fim) in enumerate(periodos, 1):
+        print(f"[RODADA {i}] ETL de {inicio} até {fim} iniciado...")
+        func_execucao(inicio, fim)
+        print(f"[OK] Rodada {i} concluída ({inicio} a {fim}).\n")
+        
+def gerar_periodos(data_inicial: str, data_final: str, meses_por_bloco: int = 6):
+    """
+    Divide o intervalo informado em blocos fixos de meses (ex: 6 meses).
+    Retorna uma lista de tuplas (inicio, fim).
+    """
+    inicio = pd.to_datetime(data_inicial, dayfirst=True)
+    fim = pd.to_datetime(data_final, dayfirst=True)
+    periodos = []
+
+    while inicio <= fim:
+        proximo_fim = min(inicio + relativedelta(months=meses_por_bloco) - pd.Timedelta(days=1), fim)
+        periodos.append((inicio.date(), proximo_fim.date()))
+        inicio = proximo_fim + pd.Timedelta(days=1)
+
+    return periodos
+
+
 
 def iniciar_chrome(url_inicial: str = None, modo_headless: bool = False, zoom: float = 1.0):
     """

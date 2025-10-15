@@ -16,6 +16,7 @@ DATASET = "OdontoClean_Dados"
 TABELA = "Recebidos"
 DIRETORIO_DOWNLOADS = r"/home/odonto/bots/downloads"
 CREDENCIAIS_PATH = r"/home/odonto/bots/GBOQ.json"
+NOME_PADRAO_ARQUIVO = 'ControleODONTO Fluxo de Caixa'
 
 # =========================================================
 # ========== FUNÇÃO PRINCIPAL =============================
