@@ -1,0 +1,199 @@
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+import os
+import time
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+
+def iniciar_chrome(url_inicial: str = None, modo_headless: bool = False, zoom: float = 1.0):
+    """
+    Inicia o navegador Chrome silenciosamente, acessa a URL inicial e define o zoom.
+
+    Parâmetros:
+        url_inicial (str): URL opcional para abrir.
+        modo_headless (bool): Define se o navegador será iniciado sem interface.
+        zoom (float): Define o nível de zoom da página (1.0 = 100%, 0.8 = 80%, etc.)
+    """
+    print("[INFO] Iniciando navegador Chrome...")
+
+    chrome_options = Options()
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-infobars")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    chrome_options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
+
+    if modo_headless:
+        chrome_options.add_argument("--headless=new")
+
+    # Redireciona logs do ChromeDriver para /dev/null (silêncio total)
+    try:
+        with open(os.devnull, 'w') as devnull:
+            old_out, old_err = os.dup(1), os.dup(2)
+            os.dup2(devnull.fileno(), 1)
+            os.dup2(devnull.fileno(), 2)
+            driver = webdriver.Chrome(options=chrome_options)
+    finally:
+        os.dup2(old_out, 1)
+        os.dup2(old_err, 2)
+
+    if url_inicial:
+        driver.get(url_inicial)
+        print(f"[INFO] Acessando URL: {url_inicial}")
+    else:
+        print("[INFO] Chrome iniciado sem URL.")
+
+    # Define o zoom desejado via JavaScript
+    try:
+        driver.execute_script(f"document.body.style.zoom = '{zoom}'")
+        print(f"[INFO] Zoom definido para {zoom * 100:.0f}%")
+    except Exception as e:
+        print(f"[AVISO] Não foi possível definir o zoom: {e}")
+
+    return driver
+
+import time
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException,
+    StaleElementReferenceException,
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+)
+
+def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int = 25, delay_apos_acao: float = 0.4):
+    """
+    Executa uma sequência de interações definidas por dicionários.
+    Tenta primeiro SEM scroll; em caso de erro, fecha avisos, FAZ SCROLL e tenta novamente.
+    """
+
+    avisos_xpaths = [
+        "//button[@class='bt bt-primary bt-outline bt-small']",
+        "//button[contains(@class,'swal2-confirm')]",
+        "//button[text()='OK' or text()='Ok' or text()='ok']",
+        "//div[@role='dialog']//button[@type='button']",
+        "//button[contains(@class,'confirmar') or contains(.,'Confirmar')]",
+    ]
+
+    def fechar_avisos():
+        """Fecha possíveis avisos/popup quando houver erro."""
+        for aviso_xpath in avisos_xpaths:
+            try:
+                btn = WebDriverWait(driver, 3).until(
+                    EC.element_to_be_clickable((By.XPATH, aviso_xpath))
+                )
+                # sem scroll aqui; prioridade é fechar rápido
+                btn.click()
+                time.sleep(0.25)
+                print(f"[INFO] Aviso fechado: {aviso_xpath}")
+            except Exception:
+                pass
+
+    for item in acoes:
+        xpath = item.get("xpath")
+        acao = item.get("acao", "clicar")
+        texto = item.get("texto")
+        n = item.get("n")
+        descricao = item.get("descricao", xpath)
+
+        for tentativa in range(1, max_retries + 1):
+            try:
+                # 1) aguarda presença (timeout curto por tentativa)
+                elementos = WebDriverWait(driver, min(timeout, 10)).until(
+                    EC.presence_of_all_elements_located((By.XPATH, xpath))
+                )
+                elemento = elementos[n] if n is not None and n < len(elementos) else elementos[0]
+
+                # 2) tenta ação SEM scroll primeiro
+                if acao == "clicar":
+                    try:
+                        elemento.click()
+                        print(f"[INFO] Ação 'clicar' executada com sucesso: {descricao}")
+                        time.sleep(delay_apos_acao)
+                        break
+                    except (ElementClickInterceptedException, ElementNotInteractableException) as e:
+                        print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: {type(e).__name__}. Fechando avisos e rolando até o elemento...")
+                        fechar_avisos()
+                        # 3) agora faz scroll e tenta novamente
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
+                        time.sleep(0.25)
+                        try:
+                            WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, xpath)))
+                            elemento.click()
+                            print(f"[INFO] Ação 'clicar' executada com sucesso: {descricao}")
+                            time.sleep(delay_apos_acao)
+                            break
+                        except Exception as e2:
+                            # deixa cair para retry global
+                            time.sleep(0.8 * tentativa)
+
+                elif acao == "digitar":
+                    try:
+                        elemento.clear()
+                        elemento.send_keys(texto)
+                        print(f"[INFO] Ação 'digitar' executada com sucesso: {descricao}")
+                        time.sleep(delay_apos_acao)
+                        break
+                    except Exception as e:
+                        print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: erro ao digitar ({e}). Fechando avisos e rolando até o elemento...")
+                        fechar_avisos()
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
+                        time.sleep(0.25)
+                        try:
+                            elemento.clear()
+                            elemento.send_keys(texto)
+                            print(f"[INFO] Ação 'digitar' executada com sucesso: {descricao}")
+                            time.sleep(delay_apos_acao)
+                            break
+                        except Exception:
+                            time.sleep(0.8 * tentativa)
+
+                else:
+                    raise ValueError(f"Ação inválida: {acao}")
+
+            except (TimeoutException, StaleElementReferenceException) as e:
+                print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: {type(e).__name__}. Fechando avisos...")
+                fechar_avisos()
+                time.sleep(1.1 * tentativa)
+                if tentativa == max_retries:
+                    driver.save_screenshot(f"erro_{int(time.time())}.png")
+                    print(f"[ERRO] Falha ao interagir com {descricao}.")
+                    raise e
+
+            except Exception as e:
+                print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: erro inesperado ({e}). Fechando avisos...")
+                fechar_avisos()
+                time.sleep(1.1 * tentativa)
+                if tentativa == max_retries:
+                    driver.save_screenshot(f"erro_{int(time.time())}.png")
+                    print(f"[ERRO] Falha inesperada ao interagir com {descricao}.")
+                    raise e
+
+
+
+
+
+def realizar_login_codonto(driver, usuario: str, senha: str):
+    """
+    Realiza o login no sistema Codonto usando interagir_elementos.
+    """
+    print("[INFO] Efetuando login no Codonto...")
+
+    acoes_login = [
+        {"xpath": "//input[@id='login']", "acao": "digitar", "texto": usuario, "descricao": "Campo Usuário"},
+        {"xpath": "//input[@id='pass']", "acao": "digitar", "texto": senha, "descricao": "Campo Senha"},
+        {"xpath": "//input[@id='checkTermsOfUse']","descricao":"Termos de Uso"},
+        {"xpath": "//button[@id='btnSubmit']", "acao": "clicar", "descricao": "Botão Entrar"},
+    ]
+
+    interagir_elementos(driver, acoes_login)
+    print("[INFO] Login realizado com sucesso ✅")
+    time.sleep(2)
