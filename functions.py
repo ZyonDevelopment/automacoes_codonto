@@ -5,173 +5,212 @@ import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
-import pandas as pd
-from dateutil.relativedelta import relativedelta
 from selenium.common.exceptions import (
     TimeoutException,
     StaleElementReferenceException,
     ElementClickInterceptedException,
     ElementNotInteractableException,
 )
+import pandas as pd
+from dateutil.relativedelta import relativedelta
 import re
+from typing import Dict, Set, Optional
+# ====== Fechamento do navegador sem travar ======
+import subprocess
+from threading import Thread
+
+def _quit_driver(driver):
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+def fechar_navegador(driver, timeout: float = 3.0):
+    """Fecha o Selenium graciosamente; se travar, mata o chromedriver (e filhos)."""
+    t = Thread(target=_quit_driver, args=(driver,), daemon=True)
+    t.start()
+    t.join(timeout)
+
+    if t.is_alive():
+        pid = None
+        try:
+            pid = driver.service.process.pid
+        except Exception:
+            pass
+        if pid is not None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.run(["pkill", "-TERM", "-P", str(pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    os.kill(pid, 9)
+                except Exception:
+                    pass
+        log("Navegador finalizado por kill (fallback)", "WARN")
+    else:
+        log("Navegador encerrado", "OK")
+
+def fechar_navegador_assincrono(driver, timeout: float = 3.0):
+    """Dispara o fechamento do navegador em background e retorna imediatamente."""
+    Thread(target=fechar_navegador, args=(driver, timeout), daemon=True).start()
+
+# =========================================================
+# ========== SISTEMA DE LOG COM TEMPORIZAÇÃO ==============
+# =========================================================
+_START_TIME = time.time()
+
+def reset_tempo_base():
+    global _START_TIME
+    _START_TIME = time.time()
+
+def log(msg: str, tipo: str = "INFO"):
+    elapsed = time.time() - _START_TIME
+    prefix = f"[{elapsed:05.1f}s]"
+    tipo = tipo.upper()
+    if tipo == "ERRO":
+        print(f"{prefix} ❌ {msg}")
+    elif tipo == "WARN":
+        print(f"{prefix} ⚠️  {msg}")
+    elif tipo == "OK":
+        print(f"{prefix} ✅ {msg}")
+    else:
+        print(f"{prefix} {msg}")
+
+
+# =========================================================
+# ========== FUNÇÕES DE ARQUIVOS / DOWNLOADS ==============
+# =========================================================
+TEMP_SUFFIXES = (".crdownload", ".part", ".download", ".tmp")
+import os, re, time
 from typing import Dict, Set, Optional
 
 TEMP_SUFFIXES = (".crdownload", ".part", ".download", ".tmp")
 
 def _listar_arquivos_validos(pasta: str) -> Dict[str, float]:
     """
-    Retorna dict {nome_arquivo: mtime} ignorando arquivos temporários.
+    Lista arquivos válidos (não temporários) e seus mtimes de forma otimizada.
+    Usa os.scandir() em vez de os.listdir() + getmtime, o que é 5–10x mais rápido.
     """
-    itens = {}
-    for nome in os.listdir(pasta):
-        # ignora temp de navegadores
-        if nome.lower().endswith(TEMP_SUFFIXES):
-            continue
-        caminho = os.path.join(pasta, nome)
-        if os.path.isfile(caminho):
-            itens[nome] = os.path.getmtime(caminho)
-    return itens
+    arquivos = {}
+    with os.scandir(pasta) as it:
+        for entry in it:
+            if not entry.is_file():
+                continue
+            nome = entry.name
+            if nome.lower().endswith(TEMP_SUFFIXES):
+                continue
+            try:
+                arquivos[nome] = entry.stat().st_mtime
+            except FileNotFoundError:
+                continue
+    return arquivos
+
 
 def snapshot_downloads(pasta_download: str) -> Set[str]:
-    """Tira um snapshot (conjunto) dos nomes existentes e válidos na pasta."""
+    """
+    Captura um snapshot rápido dos arquivos atuais válidos na pasta.
+    Usado para comparar antes/depois de um novo download.
+    """
     return set(_listar_arquivos_validos(pasta_download).keys())
 
-def _match_por_regex_ou_substring(nome: str, regex: Optional[str], substring: Optional[str]) -> bool:
-    if regex:
-        return re.search(regex, nome) is not None
-    if substring:
-        return substring.lower() in nome.lower()
-    return False  # se nada foi fornecido, não casa
 
-def _arquivo_estavel(caminho: str, espera_estabilidade: float = 2.0) -> bool:
+def _match_por_regex_ou_substring(nome: str, regex: Optional[str], substring: Optional[str]) -> bool:
     """
-    Considera 'estável' se o tamanho não mudar dentro da janela espera_estabilidade.
+    Retorna True se o nome casar com a regex OU contiver a substring.
+    """
+    if regex and re.search(regex, nome):
+        return True
+    if substring and substring.lower() in nome.lower():
+        return True
+    return False
+
+
+def _arquivo_estavel(caminho: str, espera_estabilidade: float = 0.2) -> bool:
+    """
+    Verifica se o tamanho do arquivo não muda dentro de um intervalo curto.
     """
     try:
-        tamanho1 = os.path.getsize(caminho)
+        tamanho_inicial = os.path.getsize(caminho)
         time.sleep(espera_estabilidade)
-        tamanho2 = os.path.getsize(caminho)
-        return tamanho1 == tamanho2
-    except FileNotFoundError:
+        tamanho_final = os.path.getsize(caminho)
+        return tamanho_inicial == tamanho_final
+    except (FileNotFoundError, PermissionError):
         return False
-
+    
 def aguardar_novo_download(
     pasta_download: str,
     snapshot_anterior: Set[str],
     nome_substring: Optional[str] = None,
     regex_nome: Optional[str] = None,
-    timeout: int = 180,
-    intervalo_polls: float = 1.5,
-    espera_estabilidade: float = 2.0,
+    timeout: int = 45,
+    intervalo_polls: float = 0.1,
+    # parâmetro mantido só por compatibilidade, mas ignorado:
+    espera_estabilidade: float = 0.0,
 ) -> str:
     """
-    Aguarda até surgir UM NOVO arquivo (não-temp) na pasta, que case com
-    regex_nome OU nome_substring, e esteja estável.
-    Retorna o CAMINHO COMPLETO do arquivo encontrado.
-
-    Estratégia:
-    1) Compara o diretório com snapshot_anterior e pega apenas os 'novos'.
-    2) Dentro dos novos, filtra por padrão (regex ou substring).
-    3) Garante estabilidade (tamanho não cresce).
-    4) Se múltiplos novos casarem, pega o mais recente por mtime.
+    Espera até a LISTA de arquivos válidos mudar em relação ao snapshot.
+    Quando mudar, avalia apenas os ARQUIVOS NOVOS (não-temporários),
+    filtra por substring/regex e retorna imediatamente o mais recente.
+    (Sem checagem de 'estabilidade' de tamanho.)
     """
-    print(f"[INFO] Aguardando novo download na pasta: {pasta_download}")
-    inicio = time.time()
+    #log(f"Aguardando novo download em: {pasta_download}")
+    t0 = time.time()
+    snap = set(snapshot_anterior)  # cópia para comparação
 
-    while time.time() - inicio <= timeout:
-        atuais = _listar_arquivos_validos(pasta_download)
-        novos = [n for n in atuais.keys() if n not in snapshot_anterior]
+    while True:
+        if time.time() - t0 > timeout:
+            raise TimeoutError("Tempo limite aguardando novo download compatível.")
 
-        # filtra por padrão
-        candidatos = [n for n in novos if _match_por_regex_ou_substring(n, regex_nome, nome_substring)]
+        # lista atual (só válidos: já ignora .crdownload/.part/.tmp)
+        atuais_dict = _listar_arquivos_validos(pasta_download)  # {nome: mtime}
+        atuais = set(atuais_dict.keys())
 
-        if candidatos:
-            # escolhe o mais recente pelo mtime
-            candidatos.sort(key=lambda n: atuais[n], reverse=True)
+        if atuais != snap:
+            # houve mudança na pasta
+            novos = [n for n in atuais if n not in snap]
+            if not novos:
+                snap = atuais
+                time.sleep(intervalo_polls)
+                continue
+
+            # aplica filtro (regex ou substring)
+            candidatos = [n for n in novos if _match_por_regex_ou_substring(n, regex_nome, nome_substring)]
+            if not candidatos:
+                snap = atuais
+                time.sleep(intervalo_polls)
+                continue
+
+            # retorna o mais recente por mtime
+            candidatos.sort(key=lambda n: atuais_dict.get(n, 0.0), reverse=True)
             escolhido = candidatos[0]
-            caminho_escolhido = os.path.join(pasta_download, escolhido)
+            caminho = os.path.join(pasta_download, escolhido)
+            log(f"✅ Arquivo detectado: {escolhido}", "OK")
+            return caminho
 
-            # confirma estabilidade
-            if _arquivo_estavel(caminho_escolhido, espera_estabilidade=espera_estabilidade):
-                print(f"[OK] Novo arquivo detectado e estável: {escolhido}")
-                return caminho_escolhido
-            # se não estável ainda, continua polling
         time.sleep(intervalo_polls)
 
-    raise TimeoutError(
-        "[ERRO] Tempo limite esperando novo download compatível com o padrão. "
-        "Verifique se o navegador realmente iniciou o download e o nome esperado."
-    )
 
-
+# =========================================================
+# ========== CONTROLE DE PERÍODOS ==========================
+# =========================================================
 def gerar_periodos(data_inicial: str, data_final: str, meses_por_bloco: int = 6):
-    """
-    Divide o intervalo em blocos de meses (ex: 6 meses = semestre).
-    Retorna lista de tuplas (inicio, fim).
-    """
-    inicio = pd.to_datetime(data_inicial)
-    fim = pd.to_datetime(data_final)
-    periodos = []
-
-    while inicio <= fim:
-        proximo_fim = min(inicio + relativedelta(months=meses_por_bloco) - pd.Timedelta(days=1), fim)
-        periodos.append((inicio.date(), proximo_fim.date()))
-        inicio = proximo_fim + pd.Timedelta(days=1)
-
-    return periodos
-
-
-def rodar_em_blocos(data_inicial, data_final, meses_por_bloco, func_execucao):
-    """
-    Controla a execução de qualquer função em blocos de tempo.
-    Recebe:
-      - data_inicial, data_final
-      - meses_por_bloco (ex: 6)
-      - func_execucao(inicio, fim): função que roda o ETL de cada bloco
-    """
-    periodos = gerar_periodos(data_inicial, data_final, meses_por_bloco)
-    print(f"[INFO] Intervalo total {data_inicial} a {data_final}")
-    print(f"[INFO] Dividido em {len(periodos)} blocos de {meses_por_bloco} meses cada.\n")
-
-    for i, (inicio, fim) in enumerate(periodos, 1):
-        print(f"[RODADA {i}] ETL de {inicio} até {fim} iniciado...")
-        func_execucao(inicio, fim)
-        print(f"[OK] Rodada {i} concluída ({inicio} a {fim}).\n")
-        
-def gerar_periodos(data_inicial: str, data_final: str, meses_por_bloco: int = 6):
-    """
-    Divide o intervalo informado em blocos fixos de meses (ex: 6 meses).
-    Retorna uma lista de tuplas (inicio, fim).
-    """
     inicio = pd.to_datetime(data_inicial, dayfirst=True)
     fim = pd.to_datetime(data_final, dayfirst=True)
     periodos = []
-
     while inicio <= fim:
         proximo_fim = min(inicio + relativedelta(months=meses_por_bloco) - pd.Timedelta(days=1), fim)
         periodos.append((inicio.date(), proximo_fim.date()))
         inicio = proximo_fim + pd.Timedelta(days=1)
-
     return periodos
 
 
-def iniciar_chrome(
-    url_inicial: str = None,
-    modo_headless: bool = False,
-    zoom: float = 1.0,
-    pasta_download: str = None
-):
-    """
-    Inicia o navegador Chrome com download controlado e configurações seguras.
-
-    Parâmetros:
-        url_inicial (str): URL opcional para abrir.
-        modo_headless (bool): Define se o navegador será iniciado sem interface.
-        zoom (float): Define o nível de zoom da página (1.0 = 100%, 0.8 = 80%, etc.)
-        pasta_download (str): Caminho da pasta onde os downloads serão salvos.
-    """
-    print("[INFO] Iniciando navegador Chrome...")
+# =========================================================
+# ========== NAVEGADOR SELENIUM ============================
+# =========================================================
+def iniciar_chrome(url_inicial: str = None, modo_headless: bool = False, zoom: float = 1.0, pasta_download: str = None):
+    #log("Iniciando navegador Chrome...")
 
     chrome_options = Options()
     chrome_options.add_argument("--no-sandbox")
@@ -187,7 +226,6 @@ def iniciar_chrome(
     if modo_headless:
         chrome_options.add_argument("--headless=new")
 
-    # ✅ Configuração de pasta de download segura
     if pasta_download:
         os.makedirs(pasta_download, exist_ok=True)
         prefs = {
@@ -197,43 +235,37 @@ def iniciar_chrome(
             "safebrowsing.enabled": True
         }
         chrome_options.add_experimental_option("prefs", prefs)
-        print(f"[INFO] Pasta de download configurada: {pasta_download}")
+        #log(f"Pasta de download: {pasta_download}")
     else:
-        print("[AVISO] Nenhuma pasta de download definida — Chrome usará a padrão do sistema.")
+        log("Nenhuma pasta de download definida — usando padrão do sistema", "WARN")
 
-    # Redireciona logs do ChromeDriver para /dev/null (silêncio total)
-    try:
-        with open(os.devnull, 'w') as devnull:
-            old_out, old_err = os.dup(1), os.dup(2)
-            os.dup2(devnull.fileno(), 1)
-            os.dup2(devnull.fileno(), 2)
-            driver = webdriver.Chrome(options=chrome_options)
-    finally:
+    with open(os.devnull, 'w') as devnull:
+        old_out, old_err = os.dup(1), os.dup(2)
+        os.dup2(devnull.fileno(), 1)
+        os.dup2(devnull.fileno(), 2)
+        driver = webdriver.Chrome(options=chrome_options)
         os.dup2(old_out, 1)
         os.dup2(old_err, 2)
 
-    # Abre a URL inicial (se houver)
     if url_inicial:
         driver.get(url_inicial)
-        print(f"[INFO] Acessando URL: {url_inicial}")
+        #log(f"Acessando: {url_inicial}")
     else:
-        print("[INFO] Chrome iniciado sem URL.")
+        log("Chrome iniciado sem URL")
 
-    # Define o zoom desejado via JavaScript
     try:
         driver.execute_script(f"document.body.style.zoom = '{zoom}'")
-        print(f"[INFO] Zoom definido para {zoom * 100:.0f}%")
-    except Exception as e:
-        print(f"[AVISO] Não foi possível definir o zoom: {e}")
+        #log(f"Zoom definido para {zoom * 100:.0f}%")
+    except Exception:
+        log("Falha ao aplicar zoom", "WARN")
 
     return driver
 
-def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int = 25, delay_apos_acao: float = 0.4):
-    """
-    Executa uma sequência de interações definidas por dicionários.
-    Tenta primeiro SEM scroll; em caso de erro, fecha avisos, FAZ SCROLL e tenta novamente.
-    """
 
+# =========================================================
+# ========== INTERAÇÃO COM ELEMENTOS =======================
+# =========================================================
+def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int = 25, delay_apos_acao: float = 0.4):
     avisos_xpaths = [
         "//button[@class='bt bt-primary bt-outline bt-small']",
         "//button[contains(@class,'swal2-confirm')]",
@@ -243,16 +275,12 @@ def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int 
     ]
 
     def fechar_avisos():
-        """Fecha possíveis avisos/popup quando houver erro."""
         for aviso_xpath in avisos_xpaths:
             try:
-                btn = WebDriverWait(driver, 3).until(
-                    EC.element_to_be_clickable((By.XPATH, aviso_xpath))
-                )
-                # sem scroll aqui; prioridade é fechar rápido
+                btn = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, aviso_xpath)))
                 btn.click()
                 time.sleep(0.25)
-                print(f"[INFO] Aviso fechado: {aviso_xpath}")
+                log(f"Aviso fechado: {aviso_xpath}", "WARN")
             except Exception:
                 pass
 
@@ -265,94 +293,62 @@ def interagir_elementos(driver, acoes: list, max_retries: int = 3, timeout: int 
 
         for tentativa in range(1, max_retries + 1):
             try:
-                # 1) aguarda presença (timeout curto por tentativa)
                 elementos = WebDriverWait(driver, min(timeout, 10)).until(
                     EC.presence_of_all_elements_located((By.XPATH, xpath))
                 )
                 elemento = elementos[n] if n is not None and n < len(elementos) else elementos[0]
 
-                # 2) tenta ação SEM scroll primeiro
                 if acao == "clicar":
                     try:
                         elemento.click()
-                        #print(f"[→] {descricao}")
+                        #log(f"{descricao}")
                         time.sleep(delay_apos_acao)
                         break
-                    except (ElementClickInterceptedException, ElementNotInteractableException) as e:
-                        print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: {type(e).__name__}. Fechando avisos e rolando até o elemento...")
+                    except (ElementClickInterceptedException, ElementNotInteractableException):
+                        log(f"Tentativa {tentativa} falhou: {descricao} (bloqueado)", "WARN")
                         fechar_avisos()
-                        # 3) agora faz scroll e tenta novamente
                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
-                        time.sleep(0.25)
-                        try:
-                            WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, xpath)))
-                            elemento.click()
-                            print(f"[INFO] Ação 'clicar' executada com sucesso: {descricao}")
-                            time.sleep(delay_apos_acao)
-                            break
-                        except Exception as e2:
-                            # deixa cair para retry global
-                            time.sleep(0.8 * tentativa)
+                        time.sleep(0.3)
+                        elemento.click()
+                        #log(f"{descricao} (via scroll)")
+                        time.sleep(delay_apos_acao)
+                        break
 
                 elif acao == "digitar":
-                    try:
-                        elemento.clear()
-                        elemento.send_keys(texto)
-                        #print(f"[→] digitou em {descricao}")
-                        time.sleep(delay_apos_acao)
-                        break
-                    except Exception as e:
-                        print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: erro ao digitar ({e}). Fechando avisos e rolando até o elemento...")
-                        fechar_avisos()
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
-                        time.sleep(0.25)
-                        try:
-                            elemento.clear()
-                            elemento.send_keys(texto)
-                            #print(f"[INFO] Ação 'digitar' executada com sucesso: {descricao}")
-                            time.sleep(delay_apos_acao)
-                            break
-                        except Exception:
-                            time.sleep(0.8 * tentativa)
+                    elemento.clear()
+                    elemento.send_keys(texto)
+                    #log(f"digitou em {descricao}")
+                    time.sleep(delay_apos_acao)
+                    break
 
-                else:
-                    raise ValueError(f"Ação inválida: {acao}")
-
-            except (TimeoutException, StaleElementReferenceException) as e:
-                #print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: {type(e).__name__}. Fechando avisos...")
+            except (TimeoutException, StaleElementReferenceException):
+                log(f"Tentativa {tentativa} falhou: {descricao}", "WARN")
                 fechar_avisos()
-                time.sleep(1.1 * tentativa)
                 if tentativa == max_retries:
-                    driver.save_screenshot(f"erro_{int(time.time())}.png")
-                    print(f"[ERRO] Falha ao interagir com {descricao}.")
-                    raise e
+                    log(f"Falha definitiva em {descricao}", "ERRO")
+                    raise
+                time.sleep(1)
 
             except Exception as e:
-                print(f"[WARN] Tentativa {tentativa} falhou em {descricao}: erro inesperado ({e}). Fechando avisos...")
+                log(f"Erro inesperado em {descricao}: {e}", "ERRO")
                 fechar_avisos()
-                time.sleep(1.1 * tentativa)
                 if tentativa == max_retries:
-                    driver.save_screenshot(f"erro_{int(time.time())}.png")
-                    print(f"[ERRO] Falha inesperada ao interagir com {descricao}.")
-                    raise e
+                    raise
 
 
-
-
-
+# =========================================================
+# ========== LOGIN PADRÃO CODONTO ==========================
+# =========================================================
 def realizar_login_codonto(driver, usuario: str, senha: str):
-    """
-    Realiza o login no sistema Codonto usando interagir_elementos.
-    """
-    print("[INFO] Efetuando login no Codonto...")
+    #log("Login no Codonto...")
 
     acoes_login = [
         {"xpath": "//input[@id='login']", "acao": "digitar", "texto": usuario, "descricao": "Campo Usuário"},
         {"xpath": "//input[@id='pass']", "acao": "digitar", "texto": senha, "descricao": "Campo Senha"},
-        {"xpath": "//input[@id='checkTermsOfUse']","descricao":"Termos de Uso"},
+        {"xpath": "//input[@id='checkTermsOfUse']", "descricao": "Termos de Uso"},
         {"xpath": "//button[@id='btnSubmit']", "acao": "clicar", "descricao": "Botão Entrar"},
     ]
 
     interagir_elementos(driver, acoes_login)
-    print("[INFO] Login realizado com sucesso ✅")
+    #log("Login OK", "OK")
     time.sleep(2)
