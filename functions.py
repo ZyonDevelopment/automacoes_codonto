@@ -129,9 +129,8 @@ def fechar_navegador(driver, timeout: float = 3.0) -> None:
                     os.kill(pid, 9)
                 except Exception:
                     pass
-        log("Navegador finalizado por kill (fallback)", "WARN")
     else:
-        log("Navegador encerrado", "OK")
+        pass
 
 
 def fechar_navegador_assincrono(driver, timeout: float = 3.0) -> None:
@@ -265,7 +264,6 @@ def apagar_arquivos_seguro(caminhos, pasta_padrao: Optional[str] = None) -> bool
             if os.path.exists(caminho):
                 try:
                     os.remove(caminho)
-                    log(f"🧹 Arquivo apagado: {os.path.basename(caminho)}", "OK")
                 except PermissionError:
                     # Tenta uma segunda vez, caso o arquivo ainda esteja sendo usado
                     time.sleep(0.5)
@@ -436,7 +434,7 @@ def interagir_elementos(
                 btn = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, aviso_xpath)))
                 btn.click()
                 time.sleep(0.25)
-                log(f"Aviso fechado: {aviso_xpath}", "WARN")
+                #log(f"Aviso fechado: {aviso_xpath}", "WARN")
             except Exception:
                 pass
 
@@ -460,7 +458,7 @@ def interagir_elementos(
                         time.sleep(delay_apos_acao)
                         break
                     except (ElementClickInterceptedException, ElementNotInteractableException):
-                        log(f"Tentativa {tentativa} falhou: {descricao} (bloqueado)", "WARN")
+                        #log(f"Tentativa {tentativa} falhou: {descricao} (bloqueado)", "WARN")
                         fechar_avisos()
                         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
                         time.sleep(0.3)
@@ -475,7 +473,7 @@ def interagir_elementos(
                     break
 
             except (TimeoutException, StaleElementReferenceException):
-                log(f"Tentativa {tentativa} falhou: {descricao}", "WARN")
+                #log(f"Tentativa {tentativa} falhou: {descricao}", "WARN")
                 fechar_avisos()
                 if tentativa == max_retries:
                     log(f"Falha definitiva em {descricao}", "ERRO")
@@ -590,22 +588,18 @@ def executar_automacao(
 ) -> None:
     """
     Executa uma automação completa (download → ETL → upload → limpeza final).
-    - Centraliza logs e prints.
-    - Garante limpeza de arquivos no final.
-    - Nenhuma automação individual deve imprimir nada diretamente.
+    Nenhuma automação deve imprimir diretamente.
     """
     from etl.etl_manager import rodar_etl_generico
     from functions import log, periodo_str, apagar_arquivos_seguro
 
-    log(f"▶️  Iniciando {nome} — {periodo_str(data_inicio, data_fim)}")
-
+    log(f"▶️ {nome} — {periodo_str(data_inicio, data_fim)}")
     t_ini = time.time()
-    caminho_arquivo = None
-    resp_etl = {}
+    resp_etl, caminho_arquivo = {}, None
 
     try:
-        # 1️⃣ Executa a automação (download + ETL)
-        resp_etl = func_exec(
+        # 1️⃣ Download do arquivo
+        resultado = func_exec(
             usuario,
             senha,
             data_inicio.strftime("%d/%m/%Y"),
@@ -614,37 +608,41 @@ def executar_automacao(
             pasta_download=pasta_download,
         )
 
-        duracao = time.time() - t_ini
-        log(f"✅ {nome} concluído em {duracao:.1f}s", "OK")
+        # Suporte a retorno como string OU dict
+        if isinstance(resultado, str):
+            caminho_arquivo = resultado
+        elif isinstance(resultado, dict):
+            caminho_arquivo = resultado.get("path") or resultado.get("arquivo") or resultado.get("file")
+
+        # 2️⃣ Executa ETL local + upload BigQuery
+        if caminho_arquivo and os.path.exists(caminho_arquivo):
+            resp_etl = rodar_etl_generico(caminho_arquivo, etl_conf)
 
     except Exception as e:
-        log(f"❌ Falha em {nome}: {e}", "ERRO")
+        log(f"❌ Falha geral em {nome}: {e}", "ERRO")
 
     finally:
-        # 2️⃣ Limpeza centralizada (sem redundância)
-        caminhos_para_apagar = []
+        # 3️⃣ Limpeza — apaga arquivos do ETL e pasta de downloads
+        caminhos_para_apagar = set()
 
         if isinstance(resp_etl, dict):
-            for key in ["original_path", "arquivo_final", "csv_path"]:
-                val = resp_etl.get(key)
-                if isinstance(val, str):
-                    caminhos_para_apagar.append(val)
+            for k in ["original_path", "arquivo_final", "csv_path"]:
+                v = resp_etl.get(k)
+                if isinstance(v, str) and os.path.exists(v):
+                    caminhos_para_apagar.add(v)
 
-        if isinstance(caminho_arquivo, str):
-            caminhos_para_apagar.append(caminho_arquivo)
+        if caminho_arquivo and os.path.exists(caminho_arquivo):
+            caminhos_para_apagar.add(caminho_arquivo)
 
-        caminhos_existentes = [
-            p for p in caminhos_para_apagar
-            if isinstance(p, str) and os.path.exists(p)
-        ]
+        # também remove todos arquivos Excel residuais da pasta de downloads
+        for f in os.listdir(pasta_download):
+            if f.lower().endswith((".xlsx", ".xls", ".csv")):
+                caminhos_para_apagar.add(os.path.join(pasta_download, f))
 
-        if caminhos_existentes:
-            apagar_arquivos_seguro(caminhos_existentes, pasta_padrao=pasta_download)
-            log(f"✅ ✅ Pós-processo concluído ({nome}).", "OK")
-
-        duracao_total = time.time() - t_ini
-        log(f"✅ ✅ ✅ {nome} finalizado em {duracao_total:.1f}s", "OK")
-
+        if caminhos_para_apagar:
+            apagar_arquivos_seguro(sorted(list(caminhos_para_apagar)), pasta_padrao=pasta_download)
+        else:
+            log("⚠️ Nenhum arquivo encontrado para exclusão.", "WARN")
 
 # =========================================================
 # ========== MODO EXPRESSO (TODAS AS AUTOMAÇÕES) ===========

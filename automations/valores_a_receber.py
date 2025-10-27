@@ -33,16 +33,23 @@ NOME_PADRAO_ARQUIVO = "ControleODONTO - Títulos a Receber"
 # ========== CONFIGURAÇÃO DE ETL ===========================
 # =========================================================
 ETL_CONFIG = {
-    "skip_top": 2,
-    "skip_bottom": 2,
-    "etl_especifico": "a_receber",
-    "use_etl_pos": "",
-    "tabela": TABELA,
-    "coluna_validacao": "valor_devido",
-    "periodo_coluna": "vencimento",
-    "chaves_particao": [],
+    # ======== Leitura ========
+    "skip_top": 2,                  # pula cabeçalho extra do relatório
+    "skip_bottom": 2,               # remove rodapé do arquivo
+    "etl_especifico": "a_receber",  # módulo etl_a_receber.py
+    "use_etl_pos": "",              # se não tiver pós-etl, pode deixar vazio
+
+    # ======== Upload BigQuery ========
+    "tabela": TABELA,               # ex: "A_Receber"
+    "coluna_validacao": "valor_devido",  # usada p/ soma e checagem
+    "periodo_coluna": "vencimento",      # coluna de datas para logs e deleção
+    "limpar_periodo": True,              # NOVO: garante deleção do mesmo período antes do upload
+
+    # ======== Extras / Compatibilidade ========
+    "chaves_particao": [],          # mantido por compatibilidade futura
     "credenciais_path": CREDENCIAIS_PATH,
 }
+
 
 # =========================================================
 # ========== FUNÇÃO PRINCIPAL ==============================
@@ -52,8 +59,6 @@ def executar_a_receber(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
     Executa a automação de 'Valores A Receber'.
     Retorna o dicionário de resposta do ETL.
     """
-    log("\n=== INICIANDO AUTOMAÇÃO: VALORES A RECEBER ===")
-
     if not pasta_download:
         pasta_download = get_downloads_dir()
         log("⚠️ pasta_download não informado — usando padrão.", "WARN")
@@ -67,10 +72,8 @@ def executar_a_receber(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
     try:
         # Login
         realizar_login_codonto(driver, usuario, senha)
-        log("✅ Login realizado com sucesso", "OK")
 
         # Navegação e filtros
-        log("Navegando até A Receber...", "INFO")
         acoes_fluxo = [
             {"xpath": "//span[@class='icon fa fa-signal']", "descricao": "Ícone Contas"},
             {"xpath": "//span[@class='icon fa fa-hand-holding-usd']", "descricao": "Contas a Receber"},
@@ -82,7 +85,6 @@ def executar_a_receber(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
             {"xpath": "//a[@id='Filtrar']", "n": 1, "descricao": "Botão Filtrar"},  # <<< n=1 aqui, confirmado
         ]
         interagir_elementos(driver, acoes_fluxo)
-        log("✅ Filtros aplicados com sucesso", "OK")
         time.sleep(0.4)
 
         # Download
@@ -92,7 +94,6 @@ def executar_a_receber(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
             {"xpath": "//button[@class='swal2-confirm swal2-styled']", "descricao": "Confirmar Download"},
         ]
         interagir_elementos(driver, acoes_download)
-        log("✅ Download iniciado", "OK")
 
         caminho_arquivo = aguardar_novo_download(
             pasta_download=pasta_download,
@@ -102,8 +103,6 @@ def executar_a_receber(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
             timeout=45,
             intervalo_polls=0.2,
         )
-        log(f"[ETL] Arquivo detectado: {os.path.basename(caminho_arquivo)}", "INFO")
-
         fechar_navegador_assincrono(driver, timeout=3.0)
 
         # ETL e retorno

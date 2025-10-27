@@ -33,16 +33,25 @@ NOME_PADRAO_ARQUIVO = "ControleODONTO Fluxo de Caixa"
 # ========== CONFIGURAÇÃO DE ETL ===========================
 # =========================================================
 ETL_CONFIG = {
-    "skip_top": 0,
+    # Leitura
+    "skip_top": 0,              # ou 2, conforme o relatório
     "skip_bottom": 2,
+    
+    # ETL
     "etl_especifico": "recebidos",
     "use_etl_pos": "etl_recebidos_pos",
+
+    # Upload BigQuery
     "tabela": TABELA,
     "coluna_validacao": "valor_recebido",
     "periodo_coluna": "data",
-    "chaves_particao": [],
+    "limpar_periodo": True,     # NOVO: garante deleção por período antes do upload
+
+    # Outras opções
+    "chaves_particao": [],      # pode deixar vazio, o novo modelo não usa ainda
     "credenciais_path": CREDENCIAIS_PATH,
 }
+
 
 # =========================================================
 # ========== FUNÇÃO PRINCIPAL ==============================
@@ -52,8 +61,6 @@ def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
     Executa a automação de 'Valores Recebidos'.
     Retorna o dicionário de resposta do ETL.
     """
-    log("\n=== INICIANDO AUTOMAÇÃO: VALORES RECEBIDOS ===")
-
     if not pasta_download:
         pasta_download = get_downloads_dir()
         log("⚠️ pasta_download não informado — usando padrão.", "WARN")
@@ -67,10 +74,8 @@ def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
     try:
         # Login
         realizar_login_codonto(driver, usuario, senha)
-        log("✅ Login realizado com sucesso", "OK")
 
         # Navegação e filtros
-        log("Navegando até Recebidos...", "INFO")
         acoes_fluxo = [
             {"xpath": "//span[@class='icon fa fa-signal']", "descricao": "Ícone Contas"},
             {"xpath": "//span[@class='icon fa fa-hand-holding-usd']", "descricao": "Contas a Receber"},
@@ -82,7 +87,6 @@ def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
             {"xpath": "//a[@id='Filtrar']", "n": 2, "descricao": "Botão Filtrar"},
         ]
         interagir_elementos(driver, acoes_fluxo)
-        log("✅ Filtros aplicados com sucesso", "OK")
         time.sleep(0.4)
 
         # Download
@@ -92,7 +96,6 @@ def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
             {"xpath": "//button[@class='swal2-confirm swal2-styled']", "descricao": "Confirmar Download"},
         ]
         interagir_elementos(driver, acoes_download)
-        log("✅ Download iniciado", "OK")
 
         caminho_arquivo = aguardar_novo_download(
             pasta_download=pasta_download,
@@ -102,8 +105,6 @@ def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
             timeout=45,
             intervalo_polls=0.2,
         )
-        log(f"[ETL] Arquivo detectado: {os.path.basename(caminho_arquivo)}", "INFO")
-
         fechar_navegador_assincrono(driver, timeout=3.0)
 
         # ETL e retorno
