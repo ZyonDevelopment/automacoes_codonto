@@ -22,7 +22,7 @@ from etl.etl_manager import rodar_etl_generico
 # =========================================================
 PROJETO = "api-para-sheets-433311"
 DATASET = "Dados_OdontoClean"
-TABELA = "Recebidos_Codonto"
+TABELA = "A_Receber"
 
 # diretórios no servidor
 # Caminho atual (onde está este arquivo)
@@ -38,30 +38,26 @@ CREDENCIAIS_PATH = os.path.abspath(
 )
 
 print(f"[DEBUG] Pasta de downloads configurada: {DIRETORIO_DOWNLOADS}")
-CREDENCIAIS_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "GBOQ.json")
-)
-
 
 # nome esperado no arquivo
-NOME_PADRAO_ARQUIVO = "ControleODONTO Fluxo de Caixa"
+NOME_PADRAO_ARQUIVO = "ControleODONTO - Títulos a Receber"
 
 # =========================================================
 # ========== CONFIGURAÇÃO DE ETL (NOVO FORMATO) ===========
 # =========================================================
 ETL_CONFIG = {
     # parâmetros de leitura
-    "skip_top": 0,
+    "skip_top": 2,
     "skip_bottom": 2,
 
     # função ETL específica
-    "etl_especifico": "recebidos",
-    "use_etl_pos": "etl_recebidos_pos",
+    "etl_especifico": "",
+    "use_etl_pos": "",
 
     # parâmetros de upload BigQuery
     "tabela": TABELA,
-    "coluna_validacao": "valor_recebido",        # usada na soma de validação
-    "periodo_coluna": "data",                    # define o recorte de período
+    "coluna_validacao": "valor_devido",        # usada na soma de validação
+    "periodo_coluna": "vencimento",                    # define o recorte de período
     "chaves_particao": [], # campos usados no DELETE
 
     # caminho de credenciais (opcional)
@@ -71,15 +67,15 @@ ETL_CONFIG = {
 # =========================================================
 # ========== FUNÇÃO PRINCIPAL DA AUTOMAÇÃO ================
 # =========================================================
-def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_download=None):
+def executar_a_receber(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_download=None):
     """
-    Executa a automação de 'Valores Recebidos':
+    Executa a automação de 'Valores a Receber':
     - Faz login no Codonto.
     - Aplica filtros de data.
     - Baixa o relatório Excel.
     - Executa o ETL e faz upload ao BigQuery.
     """
-    print("\n=== INICIANDO AUTOMAÇÃO: VALORES RECEBIDOS ===")
+    print("\n=== INICIANDO AUTOMAÇÃO: VALORES A RECEBER ===")
 
     if not pasta_download:
         # fallback seguro (mas ideal é vir do manager)
@@ -104,17 +100,17 @@ def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
 
     # 3) Navegar até tela de Recebidos e aplicar filtros
     try:
-        log("Navegando até Recebidos...", "INFO")
+        log("Navegando até A Receber...", "INFO")
 
         acoes_fluxo = [
             {"xpath": "//span[@class='icon fa fa-signal']", "descricao": "Ícone Contas"},
             {"xpath": "//span[@class='icon fa fa-hand-holding-usd']", "descricao": "Contas a Receber"},
-            {"xpath": "//a[@href='#maintabRecebiveis-recebidos']", "descricao": "Aba Recebidos"},
-            {"xpath": "//a[@href='#subtabRecebidos-pesquisar']", "descricao": "Subaba Pesquisar"},
+            {"xpath": "//a[@href='#maintabRecebiveis-receber']", "descricao": "Aba Recebidos"},
+            {"xpath": "//a[@href='#subtabRecebiveis-pesquisar']", "descricao": "Subaba Pesquisar"},
             {"xpath": "//span[@title='Mostrar Período']", "n": 0, "descricao": "Mostrar Período"},
-            {"xpath": "//input[@name='RecebidoDataInicio']",  "acao": "digitar", "texto": data_inicio, "descricao": "Data Início"},
-            {"xpath": "//input[@name='RecebidoDataTermino']", "acao": "digitar", "texto": data_fim,    "descricao": "Data Fim"},
-            {"xpath": "//a[@id='Filtrar']", "n": 2, "descricao": "Botão Filtrar"},
+            {"xpath": "//input[@name='ReceberDataVencimentoDataInicio']",  "acao": "digitar", "texto": data_inicio, "descricao": "Data Início"},
+            {"xpath": "//input[@name='ReceberDataVencimentoDataTermino']", "acao": "digitar", "texto": data_fim,    "descricao": "Data Fim"},
+            {"xpath": "//a[@id='Filtrar']", "n": 1, "descricao": "Botão Filtrar"},
         ]
         interagir_elementos(driver, acoes_fluxo)
         log("✅ Filtros aplicados com sucesso", "OK")
@@ -154,27 +150,8 @@ def executar_recebidos(usuario, senha, data_inicio, data_fim, zoom=0.8, pasta_do
         raise
 
     # 5) Executa ETL + Upload BigQuery
-        # 5) Executa ETL + Upload BigQuery
     try:
-        # Agora rodar_etl_generico retorna um dicionário completo (com caminhos)
-        resp = rodar_etl_generico(caminho_arquivo, ETL_CONFIG)
-
-        # Verifica se o ETL foi bem-sucedido
-        if not resp.get("ok"):
-            log(f"[ETL] Falha geral: {resp.get('mensagem')}", "ERRO")
-            return
-
-        # Limpeza segura — apaga os arquivos desse run
-        from functions import apagar_arquivos_seguro
-        apagar_arquivos_seguro([
-            resp.get("original_path"),
-            resp.get("arquivo_final"),
-            resp.get("csv_path"),
-        ], pasta_padrao=pasta_download)
-
-        log("✅ Pós-processo concluído (downloads limpos).", "OK")
-
+        rodar_etl_generico(caminho_arquivo, ETL_CONFIG)
     except Exception as e:
         log(f"[ETL] Falha geral: {e}", "ERRO")
         raise
-
