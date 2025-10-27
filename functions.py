@@ -222,57 +222,65 @@ def aguardar_novo_download(
             candidatos.sort(key=lambda n: atuais_dict.get(n, 0.0), reverse=True)
             escolhido = candidatos[0]
             caminho = os.path.join(pasta_download, escolhido)
-            #log(f"✅ Arquivo detectado: {escolhido}", "OK")
             return caminho
 
         time.sleep(intervalo_polls)
-
 
 def apagar_arquivos_seguro(caminhos, pasta_padrao: Optional[str] = None) -> bool:
     """
     Apaga arquivos passados (um ou vários) de forma segura e alinhada com o gerenciador de downloads.
 
-    - Aceita um único caminho ou uma lista de caminhos.
-    - Ignora caminhos None ou inexistentes.
-    - Apaga com logs claros no mesmo formato das automações.
-    - Se o arquivo estiver na pasta de downloads padrão, mantém logs coerentes.
+    ✅ Aceita um único caminho ou uma lista de caminhos.
+    ✅ Ignora caminhos None, vazios ou inválidos sem gerar aviso redundante.
+    ✅ Tenta apagar com logs claros e padronizados.
+    ✅ Garante compatibilidade com caminhos relativos e absolutos.
+    ✅ Evita duplicação de mensagens (nenhum 'caminho inválido' repetido).
+
+    Args:
+        caminhos: Caminho único (str) ou lista/tupla de caminhos.
+        pasta_padrao: Pasta base onde os arquivos estão localizados (ex: downloads).
+
+    Returns:
+        bool: True se todos os arquivos foram tratados sem erro crítico.
     """
+    if not caminhos:
+        # Nenhum caminho informado — não faz log redundante aqui
+        return True
+
     if not isinstance(caminhos, (list, tuple, set)):
         caminhos = [caminhos]
 
     ok = True
 
     for caminho in caminhos:
-        if not caminho:
-            log("⚠️  Caminho inválido ou vazio para exclusão.", "WARN")
-            ok = False
+        # ignora None, dicionários, ou qualquer tipo inválido
+        if not caminho or not isinstance(caminho, str):
             continue
 
-        # Se o caminho for relativo e houver pasta padrão
+        # se o caminho for relativo e houver pasta padrão
         if pasta_padrao and not os.path.isabs(caminho):
             caminho = os.path.join(pasta_padrao, caminho)
 
-        if not os.path.exists(caminho):
-            log(f"🧹 Arquivo não encontrado (já removido): {os.path.basename(caminho)}", "INFO")
-            continue
-
         try:
-            os.remove(caminho)
-            log(f"🧹 Arquivo apagado: {os.path.basename(caminho)}", "OK")
-        except PermissionError:
-            # Às vezes o arquivo ainda está sendo liberado pelo sistema
-            time.sleep(0.5)
-            try:
-                os.remove(caminho)
-                log(f"🧹 Arquivo apagado (2ª tentativa): {os.path.basename(caminho)}", "OK")
-            except Exception as e:
-                log(f"❌ Permissão negada ao apagar {os.path.basename(caminho)}: {e}", "ERRO")
-                ok = False
+            if os.path.exists(caminho):
+                try:
+                    os.remove(caminho)
+                    log(f"🧹 Arquivo apagado: {os.path.basename(caminho)}", "OK")
+                except PermissionError:
+                    # Tenta uma segunda vez, caso o arquivo ainda esteja sendo usado
+                    time.sleep(0.5)
+                    os.remove(caminho)
+                    log(f"🧹 Arquivo apagado (2ª tentativa): {os.path.basename(caminho)}", "OK")
+            else:
+                # arquivo já removido ou inexistente — log leve
+                log(f"🧹 Arquivo não encontrado (já removido): {os.path.basename(caminho)}", "INFO")
+
         except Exception as e:
-            log(f"❌ Falha ao apagar {os.path.basename(caminho)}: {e}", "ERRO")
+            log(f"⚠️  Erro ao apagar {os.path.basename(caminho)}: {e}", "WARN")
             ok = False
 
     return ok
+
 
 
 # =========================================================
@@ -570,7 +578,6 @@ import os
 import time
 from typing import Callable
 from datetime import datetime
-
 def executar_automacao(
     nome: str,
     func_exec: Callable,
@@ -582,21 +589,23 @@ def executar_automacao(
     pasta_download: str
 ) -> None:
     """
-    Executa uma automação completa (download -> ETL -> upload -> limpeza de arquivos).
-    Totalmente à prova de falhas de caminho e com logs claros.
+    Executa uma automação completa (download → ETL → upload → limpeza final).
+    - Centraliza logs e prints.
+    - Garante limpeza de arquivos no final.
+    - Nenhuma automação individual deve imprimir nada diretamente.
     """
     from etl.etl_manager import rodar_etl_generico
-    from functions import log, periodo_str, apagar_arquivos_seguro  # importa tudo de suporte
+    from functions import log, periodo_str, apagar_arquivos_seguro
 
     log(f"▶️  Iniciando {nome} — {periodo_str(data_inicio, data_fim)}")
 
     t_ini = time.time()
     caminho_arquivo = None
-    resp = None
+    resp_etl = {}
 
     try:
-        # 1) Download via função específica (valores_recebidos, a_receber etc)
-        caminho_arquivo = func_exec(
+        # 1️⃣ Executa a automação (download + ETL)
+        resp_etl = func_exec(
             usuario,
             senha,
             data_inicio.strftime("%d/%m/%Y"),
@@ -605,41 +614,36 @@ def executar_automacao(
             pasta_download=pasta_download,
         )
 
-        if not caminho_arquivo or not os.path.exists(caminho_arquivo):
-            log(f"❌ Nenhum arquivo de download detectado para {nome}", "ERRO")
-            return
-
-        # 2) ETL + Upload BigQuery
-        resp = rodar_etl_generico(caminho_arquivo, etl_conf)
-
-        if not isinstance(resp, dict):
-            # Caso antigo — retorno ainda como string
-            resp = {
-                "ok": True,
-                "original_path": caminho_arquivo,
-                "arquivo_final": resp,
-                "csv_path": None,
-                "mensagem": "",
-            }
-
-        if not resp.get("ok"):
-            log(f"⚠️  {nome} terminou com falhas: {resp.get('mensagem')}", "WARN")
-
-        # 3) Limpeza segura (original + final + CSV)
-        apagar_arquivos_seguro([
-            resp.get("original_path"),
-            resp.get("arquivo_final"),
-            resp.get("csv_path"),
-        ], pasta_padrao=pasta_download)
-
-        log(f"✅ Pós-processo concluído para {nome} (downloads limpos).", "OK")
+        duracao = time.time() - t_ini
+        log(f"✅ {nome} concluído em {duracao:.1f}s", "OK")
 
     except Exception as e:
         log(f"❌ Falha em {nome}: {e}", "ERRO")
 
     finally:
-        duracao = time.time() - t_ini
-        log(f"✅ ✅ {nome} concluído em {duracao:.1f}s", "OK")
+        # 2️⃣ Limpeza centralizada (sem redundância)
+        caminhos_para_apagar = []
+
+        if isinstance(resp_etl, dict):
+            for key in ["original_path", "arquivo_final", "csv_path"]:
+                val = resp_etl.get(key)
+                if isinstance(val, str):
+                    caminhos_para_apagar.append(val)
+
+        if isinstance(caminho_arquivo, str):
+            caminhos_para_apagar.append(caminho_arquivo)
+
+        caminhos_existentes = [
+            p for p in caminhos_para_apagar
+            if isinstance(p, str) and os.path.exists(p)
+        ]
+
+        if caminhos_existentes:
+            apagar_arquivos_seguro(caminhos_existentes, pasta_padrao=pasta_download)
+            log(f"✅ ✅ Pós-processo concluído ({nome}).", "OK")
+
+        duracao_total = time.time() - t_ini
+        log(f"✅ ✅ ✅ {nome} finalizado em {duracao_total:.1f}s", "OK")
 
 
 # =========================================================
