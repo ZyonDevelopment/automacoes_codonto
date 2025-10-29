@@ -357,12 +357,22 @@ def periodo_str(data_inicio: datetime, data_fim: datetime) -> str:
 # ========== SELENIUM: INICIALIZAÇÃO =======================
 # =========================================================
 
+import platform
+
 def iniciar_chrome(
     url_inicial: Optional[str] = None,
     modo_headless: bool = False,
     zoom: float = 1.0,
     pasta_download: Optional[str] = None
 ) -> webdriver.Chrome:
+    """Inicia o navegador Chrome configurado para automações."""
+    import platform
+
+    # 🧠 Detecta se está em servidor Linux sem interface
+    if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
+        modo_headless = True
+        log("🌐 Modo headless ativado automaticamente (ambiente servidor).", "INFO")
+
     """Inicia o navegador Chrome configurado para automações."""
     chrome_options = Options()
     chrome_options.add_argument("--no-sandbox")
@@ -376,7 +386,12 @@ def iniciar_chrome(
     chrome_options.add_experimental_option("prefs", {"profile.default_content_setting_values.notifications": 2})
 
     if modo_headless:
-        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+
 
     if pasta_download:
         os.makedirs(pasta_download, exist_ok=True)
