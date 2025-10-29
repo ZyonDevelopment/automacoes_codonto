@@ -411,15 +411,15 @@ def iniciar_chrome(
 # =========================================================
 # ========== SELENIUM: INTERAÇÕES ==========================
 # =========================================================
-
 def interagir_elementos(
     driver,
     acoes: List[Dict[str, Optional[str]]],
     max_retries: int = 3,
     timeout: int = 55,
-    delay_apos_acao: float = 0.4
+    delay_apos_acao: float = 1
 ) -> None:
-    """Executa múltiplas ações sequenciais em elementos Selenium."""
+    """Executa múltiplas ações sequenciais em elementos Selenium, com robustez contra bloqueios."""
+
     avisos_xpaths = [
         "//button[@class='bt bt-primary bt-outline bt-small']",
         "//button[contains(@class,'swal2-confirm')]",
@@ -429,12 +429,15 @@ def interagir_elementos(
     ]
 
     def fechar_avisos() -> None:
+        """Tenta fechar quaisquer avisos modais ou popups que bloqueiem a interação."""
         for aviso_xpath in avisos_xpaths:
             try:
-                btn = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.XPATH, aviso_xpath)))
-                btn.click()
-                time.sleep(0.25)
-                #log(f"Aviso fechado: {aviso_xpath}", "WARN")
+                botoes = driver.find_elements(By.XPATH, aviso_xpath)
+                for btn in botoes:
+                    if btn.is_displayed() and btn.is_enabled():
+                        btn.click()
+                        time.sleep(0.3)
+                        log(f"Aviso fechado: {aviso_xpath}", "WARN")
             except Exception:
                 pass
 
@@ -447,44 +450,80 @@ def interagir_elementos(
 
         for tentativa in range(1, max_retries + 1):
             try:
-                elementos = WebDriverWait(driver, min(timeout, 10)).until(
-                    EC.presence_of_all_elements_located((By.XPATH, xpath))
-                )
-                elemento = elementos[n] if n is not None and n < len(elementos) else elementos[0]
+                # Caso tenha índice, esperamos a lista completa
+                if n is not None:
+                    elementos = WebDriverWait(driver, min(timeout, 15)).until(
+                        EC.presence_of_all_elements_located((By.XPATH, xpath))
+                    )
 
+                    if not elementos or n >= len(elementos):
+                        raise TimeoutException(
+                            f"Número insuficiente de elementos para {descricao}: len={len(elementos)} < n={n}"
+                        )
+
+                    elemento = elementos[n]
+                    WebDriverWait(driver, min(timeout, 10)).until(lambda d: elemento.is_displayed())
+                    WebDriverWait(driver, min(timeout, 10)).until(lambda d: elemento.is_enabled())
+
+                    # Log de debug
+                    try:
+                        debug_textos = []
+                        for idx, el in enumerate(elementos):
+                            t = (el.text or "").strip()
+                            debug_textos.append(
+                                f"{idx}: vis={el.is_displayed()} hab={el.is_enabled()} txt='{t or '(vazio)'}'"
+                            )
+                        #log(f"[DEBUG] '{descricao}' matches -> {len(elementos)} | {', '.join(debug_textos)}", "DEBUG")
+                    except Exception:
+                        pass
+                else:
+                    # Caminho padrão (sem índice)
+                    elemento = WebDriverWait(driver, min(timeout, 10)).until(
+                        EC.visibility_of_element_located((By.XPATH, xpath))
+                    )
+
+                # ====== AÇÃO PRINCIPAL ======
                 if acao == "clicar":
                     try:
                         elemento.click()
-                        time.sleep(delay_apos_acao)
-                        break
+                        #log(f"Clique realizado: {descricao}", "INFO")
                     except (ElementClickInterceptedException, ElementNotInteractableException):
-                        #log(f"Tentativa {tentativa} falhou: {descricao} (bloqueado)", "WARN")
+                        log(f"Tentativa {tentativa} falhou: {descricao} (bloqueado)", "WARN")
                         fechar_avisos()
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
-                        time.sleep(0.3)
+                        time.sleep(0.5)
+                        driver.execute_script("window.scrollBy(0, -120);")
+                        time.sleep(0.5)
+                        elemento = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath)))
                         elemento.click()
-                        time.sleep(delay_apos_acao)
-                        break
+                        log(f"Clique refeito após scroll: {descricao}", "INFO")
+                    time.sleep(delay_apos_acao)
+                    break
 
                 elif acao == "digitar":
                     elemento.clear()
                     elemento.send_keys(texto)
                     time.sleep(delay_apos_acao)
+                    #log(f"Texto digitado em: {descricao}", "INFO")
                     break
 
             except (TimeoutException, StaleElementReferenceException):
-                #log(f"Tentativa {tentativa} falhou: {descricao}", "WARN")
                 fechar_avisos()
                 if tentativa == max_retries:
                     log(f"Falha definitiva em {descricao}", "ERRO")
                     raise
-                time.sleep(1)
+                else:
+                    tempo_espera = 0.5 * tentativa
+                    log(f"Tentativa {tentativa} falhou: {descricao}, aguardando {tempo_espera:.1f}s", "WARN")
+                    time.sleep(tempo_espera)
 
             except Exception as e:
                 log(f"Erro inesperado em {descricao}: {e}", "ERRO")
                 fechar_avisos()
                 if tentativa == max_retries:
                     raise
+                time.sleep(0.5)
+
+
 
 
 # =========================================================

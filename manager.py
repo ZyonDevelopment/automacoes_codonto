@@ -32,16 +32,17 @@ SENHA_PADRAO = "Odonto1234"
 # === IMPORTA AS AUTOMAÇÕES ===
 from automations.valores_recebidos import executar_recebidos, ETL_CONFIG as ETL_RECEBIDOS
 from automations.valores_a_receber import executar_a_receber, ETL_CONFIG as ETL_A_RECEBER
+from automations.contratos_emitidos import executar_contratos, ETL_CONFIG as none
 
 # === REGISTRO CENTRAL ===
 AUTOMACOES = {
     "1": ("Recebidos", executar_recebidos, ETL_RECEBIDOS),
     "2": ("A_Receber", executar_a_receber, ETL_A_RECEBER),
+    "3": ("Contratos", executar_contratos, none)
     # futuras:
     # "3": ("Pagamentos", executar_pagamentos, ETL_PAGAMENTOS),
     # "4": ("Contratos", executar_contratos, ETL_CONTRATOS),
 }
-
 
 def menu_principal() -> None:
     """Exibe o menu principal e direciona para o modo escolhido."""
